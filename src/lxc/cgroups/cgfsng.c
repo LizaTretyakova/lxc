@@ -40,6 +40,11 @@
 #include <dirent.h>
 #include <errno.h>
 #include <grp.h>
+/*
+ * It was included from somewhere else
+ * but let's keep it clear just in case.
+ */
+#include <statfs.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +127,140 @@ static bool lxc_cgfsng_debug;
 	if (lxc_cgfsng_debug)			\
 		printf("cgfsng: " format, ##__VA_ARGS__);	\
 } while(0)
+
+/*
+ * Detemine which hiearchy we are on
+ */
+typedef enum {
+	CGROUP_NONE = -1,
+	CGROUP_LEGACY = 0,
+	CGROUP_UNIFIED = 1,
+	CGROUP_HYBRID = 2,
+} cgroup_layout_t;
+
+static thread_local cgroup_layout_t cgroup_layout = CGROUP_NONE;
+
+/*
+ * Taken from systemd code. Hope it's fine.
+ */
+/* Because statfs.t_type can be int on some architectures, we have to cast
+ * the const magic to the type, otherwise the compiler warns about
+ * signed/unsigned comparison, because the magic can be 32 bit unsigned.
+ */
+#define F_TYPE_EQUAL(a, b) (a == (typeof(a)) b)
+
+/*
+ * All these should be present in the magic.h but just in case
+ * (e.g. the system does not support cgroups v2 at all)
+ */
+#ifndef CGROUP_SUPER_MAGIC
+#define CGROUP_SUPER_MAGIC 0x27e0eb
+#endif
+
+#ifndef CGROUP2_SUPER_MAGIC
+#define CGROUP2_SUPER_MAGIC 0x63677270
+#endif
+
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0x01021994
+#endif
+
+#define CGROUP_BASE "/sys/fs/cgroup"
+
+/*
+ * A way to determine the layout
+ */
+/*
+ * TODO: any modifiers?
+ */
+static int detect_cgroup_layout() {
+	struct statfs fs;
+
+	if (cgroup_layout > CGROUP_NONE)
+		return 0;
+
+	if (statfs(CGROUP_BASE, &fs) < 0) {
+		WARN("statfs(\"/sys/fs/cgroup\") failed");
+		return errno;
+	}
+
+	if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
+		CGFSNG_DEBUG("Fully unified hierarchy on /sys/fs/cgroup");
+		cgroup_layout = CGROUP_UNIFIED;
+	} else if (F_TYPE_EQUAL(fs.f_type, TMPFS_MAGIC)) {
+		/*
+		 * I am not sure whether I should guess some mount point
+		 * we expect to see under the /sys/fs/* or
+		 * just iterate over all the directories,
+		 * and if the latter then if I can rely on the readdir's
+		 * a bit unstandartized behaviour ot not but let's see.
+		 */
+		bool layouts[] = {false, false}; // {legacy, unified}
+		int ret;
+		struct dirent *direntp;
+		DIR *dir;
+		int r = 0;
+
+		dir = opendir(CGROUP_BASE);
+		if (!dir)
+			return -1;
+
+		while ((direntp = readdir(dir))) {
+			char *pathname;
+			struct stat mystat;
+
+			if (!direntp)
+				break;
+
+			if (!strcmp(direntp->d_name, ".") ||
+			    !strcmp(direntp->d_name, ".."))
+				continue;
+
+			pathname = must_make_path(dirname, direntp->d_name, NULL);
+
+			ret = lstat(pathname, &mystat);
+			if (ret < 0) {
+				if (!r)
+					WARN("Failed to stat %s", pathname);
+				r = -1;
+				goto next;
+			}
+
+			if (!S_ISDIR(mystat.st_mode))
+				goto next;
+
+			if (statfs(pathname, &fs) < 0) {
+				WARN("statfs(\"%s\") failed", pathname);
+				return errno;
+			}
+			if (F_TYPE_EQUAL(fs.f_type, CGROUP_SUPER_MAGIC)) {
+				layouts[CGROUP_LEGACY] = true;
+			} else if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
+				layouts[CGROUP_UNIFIED] = true;
+			}
+next:
+			free(pathname);
+		}
+
+		if(layouts[CGROUP_LEGACY] && layouts[CGROUP_UNIFIED]) {
+			cgroup_layout = CGROUP_HYBRID;
+		} else if (layouts[CGROUP_LEGACY]) {
+			cgroup_layout = CGROUP_LEGACY;
+		} else if (layouts[CGROUP_UNIFIED]) {
+			cgroup_layout = CGROUP_UNIFIED;
+		}
+		/*
+		 * If there is no cgroups mounted,
+		 * just leave everything as is.
+		 */
+	} else {
+		WARN("Unknown filesystem type %llx on /sys/fs/cgroup",
+			     (unsigned long long) fs.f_type);
+		return -ENOMEDIUM;
+	}
+
+	return 0;
+}
 
 static void free_string_list(char **clist)
 {
