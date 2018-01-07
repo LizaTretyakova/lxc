@@ -165,102 +165,101 @@ static thread_local cgroup_layout_t cgroup_layout = CGROUP_NONE;
 #define TMPFS_MAGIC 0x01021994
 #endif
 
-#define CGROUP_BASE "/sys/fs/cgroup"
-
 /*
  * A way to determine the layout
  */
 /*
  * TODO: any modifiers?
  */
-static int detect_cgroup_layout() {
-	struct statfs fs;
+//#define CGROUP_BASE "/sys/fs/cgroup"
+//static int detect_cgroup_layout() {
+//	struct statfs fs;
 
-	if (cgroup_layout > CGROUP_NONE)
-		return 0;
+//	if (cgroup_layout > CGROUP_NONE)
+//		return 0;
 
-	if (statfs(CGROUP_BASE, &fs) < 0) {
-		WARN("statfs(\"/sys/fs/cgroup\") failed");
-		return errno;
-	}
+//	if (statfs(CGROUP_BASE, &fs) < 0) {
+//		WARN("statfs(\"/sys/fs/cgroup\") failed");
+//		return errno;
+//	}
 
-	if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
-		CGFSNG_DEBUG("Fully unified hierarchy on /sys/fs/cgroup");
-		cgroup_layout = CGROUP_UNIFIED;
-	} else if (F_TYPE_EQUAL(fs.f_type, TMPFS_MAGIC)) {
-		/*
-		 * I am not sure whether I should guess some mount point
-		 * we expect to see under the /sys/fs/* or
-		 * just iterate over all the directories,
-		 * and if the latter then if I can rely on the readdir's
-		 * a bit unstandartized behaviour ot not but let's see.
-		 */
-		bool layouts[] = {false, false}; // {legacy, unified}
-		int ret;
-		struct dirent *direntp;
-		DIR *dir;
-		int r = 0;
+//	if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
+//		CGFSNG_DEBUG("Fully unified hierarchy on /sys/fs/cgroup");
+//		cgroup_layout = CGROUP_UNIFIED;
+//	} else if (F_TYPE_EQUAL(fs.f_type, TMPFS_MAGIC)) {
+//		/*
+//		 * I am not sure whether I should guess some mount point
+//		 * we expect to see under the /sys/fs/* or
+//		 * just iterate over all the directories,
+//		 * and if the latter then if I can rely on the readdir's
+//		 * a bit unstandartized behaviour ot not but let's see.
+//		 */
+//		bool layouts[] = {false, false}; // {legacy, unified}
+//		int ret;
+//		struct dirent *direntp;
+//		DIR *dir;
+//		int r = 0;
 
-		dir = opendir(CGROUP_BASE);
-		if (!dir)
-			return -1;
+//		dir = opendir(CGROUP_BASE);
+//		if (!dir)
+//			return -1;
 
-		while ((direntp = readdir(dir))) {
-			char *pathname;
-			struct stat mystat;
+//		while ((direntp = readdir(dir))) {
+//			char *pathname;
+//			struct stat mystat;
 
-			if (!direntp)
-				break;
+//			if (!direntp)
+//				break;
 
-			if (!strcmp(direntp->d_name, ".") ||
-			    !strcmp(direntp->d_name, ".."))
-				continue;
+//			if (!strcmp(direntp->d_name, ".") ||
+//			    !strcmp(direntp->d_name, ".."))
+//				continue;
 
-			pathname = must_make_path(dirname, direntp->d_name, NULL);
+//			pathname = must_make_path(dirname, direntp->d_name, NULL);
 
-			ret = lstat(pathname, &mystat);
-			if (ret < 0) {
-				if (!r)
-					WARN("Failed to stat %s", pathname);
-				r = -1;
-				goto next;
-			}
+//			ret = lstat(pathname, &mystat);
+//			if (ret < 0) {
+//				if (!r)
+//					WARN("Failed to stat %s", pathname);
+//				r = -1;
+//				goto next;
+//			}
 
-			if (!S_ISDIR(mystat.st_mode))
-				goto next;
+//			if (!S_ISDIR(mystat.st_mode))
+//				goto next;
 
-			if (statfs(pathname, &fs) < 0) {
-				WARN("statfs(\"%s\") failed", pathname);
-				return errno;
-			}
-			if (F_TYPE_EQUAL(fs.f_type, CGROUP_SUPER_MAGIC)) {
-				layouts[CGROUP_LEGACY] = true;
-			} else if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
-				layouts[CGROUP_UNIFIED] = true;
-			}
-next:
-			free(pathname);
-		}
+//			if (statfs(pathname, &fs) < 0) {
+//				WARN("statfs(\"%s\") failed", pathname);
+//				return errno;
+//			}
+//			if (F_TYPE_EQUAL(fs.f_type, CGROUP_SUPER_MAGIC)) {
+//				layouts[CGROUP_LEGACY] = true;
+//			} else if (F_TYPE_EQUAL(fs.f_type, CGROUP2_SUPER_MAGIC)) {
+//				layouts[CGROUP_UNIFIED] = true;
+//			}
+//next:
+//			free(pathname);
+//		}
 
-		if(layouts[CGROUP_LEGACY] && layouts[CGROUP_UNIFIED]) {
-			cgroup_layout = CGROUP_HYBRID;
-		} else if (layouts[CGROUP_LEGACY]) {
-			cgroup_layout = CGROUP_LEGACY;
-		} else if (layouts[CGROUP_UNIFIED]) {
-			cgroup_layout = CGROUP_UNIFIED;
-		}
-		/*
-		 * If there is no cgroups mounted,
-		 * just leave everything as is.
-		 */
-	} else {
-		WARN("Unknown filesystem type %llx on /sys/fs/cgroup",
-			     (unsigned long long) fs.f_type);
-		return -ENOMEDIUM;
-	}
+//		if(layouts[CGROUP_LEGACY] && layouts[CGROUP_UNIFIED]) {
+//			cgroup_layout = CGROUP_HYBRID;
+//		} else if (layouts[CGROUP_LEGACY]) {
+//			cgroup_layout = CGROUP_LEGACY;
+//		} else if (layouts[CGROUP_UNIFIED]) {
+//			cgroup_layout = CGROUP_UNIFIED;
+//		}
+//		/*
+//		 * If there is no cgroups mounted,
+//		 * just leave everything as is.
+//		 */
+//	} else {
+//		WARN("Unknown filesystem type %llx on /sys/fs/cgroup",
+//			     (unsigned long long) fs.f_type);
+//		return -ENOMEDIUM;
+//	}
 
-	return 0;
-}
+//	return 0;
+//}
 
 static void free_string_list(char **clist)
 {
@@ -1480,6 +1479,28 @@ static void cgfsng_destroy(void *hdata, struct lxc_conf *conf)
 	free_handler_data(d);
 }
 
+static void update_cgroup_layout(void)
+{
+	/*                {legacy, unified} */
+	bool layouts[2] = {false, false};
+	struct hierarchy ** hlist = hierarchies;
+
+	for (i = 0; hlist[i]; i++)
+		if (hlist[i]->is_cgroup_v2)
+			layouts[CGROUP_UNIFIED] = true;
+		else
+			layouts[CGROUP_LEGACY] = true;
+
+	if (layouts[CGROUP_UNIFIED] && layouts[CGROUP_LEGACY])
+		cgroup_layout = CGROUP_HYBRID;
+	else if (layouts[CGROUP_UNIFIED])
+		cgroup_layout = CGROUP_UNIFIED;
+	else if (layouts[CGROUP_LEGACY])
+		cgroup_layout = CGROUP_LEGACY;
+	else /* Should it be possible? Should we do anything about it? */
+		cgroup_layout = CGROUP_NONE;
+}
+
 struct cgroup_ops *cgfsng_ops_init(void)
 {
 	if (getenv("LXC_DEBUG_CGFSNG"))
@@ -1487,6 +1508,9 @@ struct cgroup_ops *cgfsng_ops_init(void)
 
 	if (!collect_hierarchy_info())
 		return NULL;
+
+	/* Now when we populated @hierarchies, we can set the @cgroup_layout */
+	update_cgroup_layout();
 
 	return &cgfsng_ops;
 }
