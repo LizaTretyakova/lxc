@@ -894,13 +894,18 @@ static bool all_controllers_found(void)
  * is /cgroup/controller-list.  For cgroupfs, we could parse the mount
  * options.  But we simply assume that the mountpoint must be
  * /sys/fs/cgroup/controller-list
+ *
+ * ...
+ * Or -- it can just be cgroup v2 under either
+ * the whole /sys/fs/cgroup or its part like
+ * /sys/fs/cgroup/unified-hierarchy-name
  */
 static char **get_controllers(char **klist, char **nlist, char *line, int type)
 {
 	/* the fourth field is /sys/fs/cgroup/comma-delimited-controller-list */
 	int i;
 	char *dup, *p2, *tok;
-	char *p = line, *saveptr = NULL;
+	char *p = line, *saveptr = NULL, *cgroup_path = NULL;
 	char **aret = NULL;
 
 	for (i = 0; i < 4; i++) {
@@ -916,6 +921,7 @@ static char **get_controllers(char **klist, char **nlist, char *line, int type)
 		CGFSNG_DEBUG("Found hierarchy not under /sys/fs/cgroup: \"%s\"\n", p);
 		return NULL;
 	}
+	cgroup_path = p;
 	p += 15;
 	p2 = strchr(p, ' ');
 	if (!p2) {
@@ -926,7 +932,38 @@ static char **get_controllers(char **klist, char **nlist, char *line, int type)
 
 	/* cgroup v2 does not have separate mountpoints for controllers */
 	if (type == CGROUP_V2) {
-		must_append_controller(klist, nlist, &aret, "cgroup2");
+//		must_append_controller(klist, nlist, &aret, "cgroup2");
+
+		FILE *f;
+		char *controllers = NULL, *tok = NULL;
+				;
+		char *pathname = must_make_path(cgroup_path, "cgroup.controllers", NULL);
+		size_t len = 0;
+
+		if ((f = fopen(pathname, "r")) == NULL) {
+			WARN("Failed to open the %s file", pathname);
+			return NULL;
+		}
+
+		if (getline(&controllers, &len, f) < 0) {
+			WARN("Failed to read the %s file", pathname);
+			return NULL;
+		}
+
+		for (tok = strtok_r(controllers, " ", &saveptr); tok;
+				tok = strtok_r(NULL, " ", &saveptr)) {
+			/*
+			 * Do not check the @tok's presence in the {k,n}list
+			 * since it is not there (the lists are taken from the
+			 * /proc/[pid]/cgroup file which does not list the
+			 * separate cgroup v2 controllers)
+			 */
+			must_append_string(aret, tok);
+		}
+
+		free(controllers);
+		fclose(f);
+
 		return aret;
 	}
 
@@ -1501,6 +1538,10 @@ static void update_cgroup_layout(void)
 		cgroup_layout = CGROUP_NONE;
 }
 
+static void layout_unified() {
+	return cgrouplayout == CGROUP_UNIFIED;
+}
+
 struct cgroup_ops *cgfsng_ops_init(void)
 {
 	if (getenv("LXC_DEBUG_CGFSNG"))
@@ -1679,13 +1720,16 @@ static int chown_cgroup_wrapper(void *data)
 		 * container systemd can write to the files (which systemd in wily
 		 * insists on doing)
 		 */
-		fullpath = must_make_path(path, "tasks", NULL);
-		if (chown(fullpath, destuid, nsgid) < 0 && errno != ENOENT)
-			WARN("Failed chowning %s to %d: %s", fullpath, (int) destuid,
-			     strerror(errno));
-		if (chmod(fullpath, 0664) < 0)
-			WARN("Error chmoding %s: %s", path, strerror(errno));
-		free(fullpath);
+		if (!hierarchies[i]->is_cgroup_v2) {
+			/* `tasks` file removed in cgorups v2 */
+			fullpath = must_make_path(path, "tasks", NULL);
+			if (chown(fullpath, destuid, nsgid) < 0 && errno != ENOENT)
+				WARN("Failed chowning %s to %d: %s", fullpath, (int) destuid,
+				     strerror(errno));
+			if (chmod(fullpath, 0664) < 0)
+				WARN("Error chmoding %s: %s", path, strerror(errno));
+			free(fullpath);
+		}
 
 		fullpath = must_make_path(path, "cgroup.procs", NULL);
 		if (chown(fullpath, destuid, 0) < 0 && errno != ENOENT)
@@ -1752,9 +1796,10 @@ static bool cgfsng_chown(void *hdata, struct lxc_conf *conf)
 static int mount_cgroup_full(int type, struct hierarchy *h, char *dest,
 				   char *container_cgroup)
 {
+	char *fstype = h->is_cgroup_v2 ? "cgroup2" : "cgroup";
 	if (type < LXC_AUTO_CGROUP_FULL_RO || type > LXC_AUTO_CGROUP_FULL_MIXED)
 		return 0;
-	if (mount(h->mountpoint, dest, "cgroup", MS_BIND, NULL) < 0) {
+	if (mount(h->mountpoint, dest, fstype, MS_BIND, NULL) < 0) {
 		SYSERROR("Error bind-mounting %s cgroup onto %s", h->mountpoint,
 			 dest);
 		return -1;
@@ -1762,7 +1807,7 @@ static int mount_cgroup_full(int type, struct hierarchy *h, char *dest,
 	if (type != LXC_AUTO_CGROUP_FULL_RW) {
 		unsigned long flags = MS_BIND | MS_NOSUID | MS_NOEXEC | MS_NODEV |
 				      MS_REMOUNT | MS_RDONLY;
-		if (mount(NULL, dest, "cgroup", flags, NULL) < 0) {
+		if (mount(NULL, dest, fstype, flags, NULL) < 0) { // the fstype is ignored during remounting
 			SYSERROR("Error remounting %s readonly", dest);
 			return -1;
 		}
@@ -1775,6 +1820,7 @@ static int mount_cgroup_full(int type, struct hierarchy *h, char *dest,
 	/* mount just the container path rw */
 	char *source = must_make_path(h->mountpoint, h->base_cgroup, container_cgroup, NULL);
 	char *rwpath = must_make_path(dest, h->base_cgroup, container_cgroup, NULL);
+	/* TODO: will it work with the `cgroup2`???? */
 	if (mount(source, rwpath, "cgroup", MS_BIND, NULL) < 0)
 		WARN("Failed to mount %s read-write: %s", rwpath,
 		     strerror(errno));
@@ -1802,12 +1848,13 @@ do_secondstage_mounts_if_needed(int type, struct hierarchy *h,
 				char *controllerpath, char *cgpath,
 				const char *container_cgroup)
 {
+	char *fstype= h->is_cgroup_v2 ? "cgroup2" : "cgroup";
 	if (type == LXC_AUTO_CGROUP_RO || type == LXC_AUTO_CGROUP_MIXED) {
-		if (mount(controllerpath, controllerpath, "cgroup", MS_BIND, NULL) < 0) {
+		if (mount(controllerpath, controllerpath, fstype, MS_BIND, NULL) < 0) {
 			SYSERROR("Error bind-mounting %s", controllerpath);
 			return -1;
 		}
-		if (mount(controllerpath, controllerpath, "cgroup",
+		if (mount(controllerpath, controllerpath, fstype,
 			   MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) < 0) {
 			SYSERROR("Error remounting %s read-only", controllerpath);
 			return -1;
@@ -1819,7 +1866,7 @@ do_secondstage_mounts_if_needed(int type, struct hierarchy *h,
 	if (type == LXC_AUTO_CGROUP_RO)
 		flags |= MS_RDONLY;
 	INFO("Mounting %s onto %s", sourcepath, cgpath);
-	if (mount(sourcepath, cgpath, "cgroup", flags, NULL) < 0) {
+	if (mount(sourcepath, cgpath, fstype, flags, NULL) < 0) {
 		free(sourcepath);
 		SYSERROR("Error mounting cgroup %s onto %s", h->controllers[0],
 				cgpath);
