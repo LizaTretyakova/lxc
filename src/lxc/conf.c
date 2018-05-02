@@ -2665,6 +2665,8 @@ struct lxc_conf *lxc_conf_init(void)
 	new->lsm_aa_profile = NULL;
 	new->lsm_se_context = NULL;
 	new->tmp_umount_proc = 0;
+	new->lxc_shmount.path_host = NULL;
+	new->lxc_shmount.path_cont = NULL;
 
 	/* if running in a new user namespace, init and COMMAND
 	 * default to running as UID/GID 0 when using lxc-execute */
@@ -3869,6 +3871,8 @@ void lxc_conf_free(struct lxc_conf *conf)
 	lxc_clear_procs(conf, "lxc.proc");
 	free(conf->cgroup_meta.dir);
 	free(conf->cgroup_meta.controllers);
+	free(conf->lxc_shmount.path_host);
+	free(conf->lxc_shmount.path_cont);
 	free(conf);
 }
 
