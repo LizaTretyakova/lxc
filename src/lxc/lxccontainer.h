@@ -863,7 +863,7 @@ struct lxc_container {
 	/*!
 	 * \brief Unmount the container's path `target`.
 	 */
-	int (*umount2)(struct lxc_container *c, const char *target,
+	int (*umount)(struct lxc_container *c, const char *target,
 				  unsigned long mountflags, struct lxc_mount *mnt);
 };
 

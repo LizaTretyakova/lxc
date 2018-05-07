@@ -4842,7 +4842,7 @@ out_err_free:
 WRAP_API_6(int, lxcapi_mount, const char *, const char *, const char *,
 			unsigned long, const void *, struct lxc_mount*)
 
-static int do_lxcapi_umount2(struct lxc_container *c, const char *target,
+static int do_lxcapi_umount(struct lxc_container *c, const char *target,
 			  unsigned long mountflags, struct lxc_mount *mnt) {
 	pid_t pid, init_pid;
 	int ret = -1;
@@ -4879,12 +4879,11 @@ static int do_lxcapi_umount2(struct lxc_container *c, const char *target,
 			_exit(EXIT_FAILURE);
 		}
 
-		/* Do the mount */
+		/* Do the unmount */
 		ret = umount2(target, mountflags);
 		if (ret < 0) {
-			/* TODO: deal with MNT_EXPIRE? */
 			SYSERROR("Failed to umount \"%s\"", target);
-			_exit(EXIT_FAILURE);
+			_exit(ret);
 		}
 
 		_exit(EXIT_SUCCESS);
@@ -4893,13 +4892,13 @@ static int do_lxcapi_umount2(struct lxc_container *c, const char *target,
 	ret = wait_for_pid(pid);
 	if (ret < 0) {
 		SYSERROR("Wait for the child with pid %ld failed", (long) pid);
-		return -1;
+		return -errno;
 	}
 
 	return 0;
 }
 
-WRAP_API_3(int, lxcapi_umount2, const char *, unsigned long, struct lxc_mount*)
+WRAP_API_3(int, lxcapi_umount, const char *, unsigned long, struct lxc_mount*)
 
 static int lxcapi_attach_run_waitl(struct lxc_container *c, lxc_attach_options_t *options, const char *program, const char *arg, ...)
 {
@@ -5050,7 +5049,7 @@ struct lxc_container *lxc_container_new(const char *name, const char *configpath
 	c->migrate = lxcapi_migrate;
 	c->console_log = lxcapi_console_log;
 	c->mount = lxcapi_mount;
-	c->umount2 = lxcapi_umount2;
+	c->umount = lxcapi_umount;
 
 	return c;
 

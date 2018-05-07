@@ -235,7 +235,7 @@ static int perform_container_test(const char *name, const char *config_items[])
 
 	/* Check device unmounted */
 	/* TODO: what about other umount flags? */
-	ret = c->umount2(c, "/mnt/mount_injection_test_urandom", MNT_DETACH, &mnt);
+	ret = c->umount(c, "/mnt/mount_injection_test_urandom", MNT_DETACH, &mnt);
 	if (ret < 0) {
 		fprintf(stderr, "Failed to umount2 \"/dev/urandom\"\n");
 		goto out;
@@ -260,7 +260,7 @@ static int perform_container_test(const char *name, const char *config_items[])
 
 	/* Check dir unmounted */
 	/* TODO: what about other umount flags? */
-	ret = c->umount2(c, template_dir, MNT_DETACH, &mnt);
+	ret = c->umount(c, template_dir, MNT_DETACH, &mnt);
 	if (ret < 0) {
 		fprintf(stderr, "Failed to umount2 \"%s\"\n", template_dir);
 		goto out;
