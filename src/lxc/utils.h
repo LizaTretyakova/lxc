@@ -101,6 +101,17 @@
 #define LXC_LINELEN 4096
 #define LXC_IDMAPLEN 4096
 #define LXC_MAX_BUFFER 4096
+/* /proc/       =    6
+ *                +
+ * <pid-as-str> =   LXC_NUMSTRLEN64
+ *                +
+ * /fd/         =    4
+ *                +
+ * <fd-as-str>  =   LXC_NUMSTRLEN64
+ *                +
+ * \0           =    1
+ */
+#define LXC_PROC_PID_FD_LEN (6 + LXC_NUMSTRLEN64 + 4 + LXC_NUMSTRLEN64 + 1)
 
 /* returns 1 on success, 0 if there were any failures */
 extern int lxc_rmdir_onedev(const char *path, const char *exclude);
@@ -113,6 +124,22 @@ extern char *get_rundir(void);
 #ifdef HAVE_FGETLN
 #include <../include/getline.h>
 #endif
+#endif
+
+#if !defined(__NR_setns) && !defined(__NR_set_ns)
+	#if defined(__x86_64__)
+		#define __NR_setns 308
+	#elif defined(__i386__)
+		#define __NR_setns 346
+	#elif defined(__arm__)
+		#define __NR_setns 375
+	#elif defined(__aarch64__)
+		#define __NR_setns 375
+	#elif defined(__powerpc__)
+		#define __NR_setns 350
+	#elif defined(__s390__)
+		#define __NR_setns 339
+	#endif
 #endif
 
 /* Define setns() if missing from the C library */
@@ -132,7 +159,7 @@ static inline int setns(int fd, int nstype)
 
 /* Define sethostname() if missing from the C library */
 #ifndef HAVE_SETHOSTNAME
-static inline int sethostname(const char * name, size_t len)
+static inline int sethostname(const char *name, size_t len)
 {
 #ifdef __NR_sethostname
 return syscall(__NR_sethostname, name, len);
@@ -365,8 +392,8 @@ extern int wait_for_pid(pid_t pid);
 extern int lxc_wait_for_pid_status(pid_t pid);
 
 /* send and receive buffers completely */
-extern ssize_t lxc_write_nointr(int fd, const void* buf, size_t count);
-extern ssize_t lxc_read_nointr(int fd, void* buf, size_t count);
+extern ssize_t lxc_write_nointr(int fd, const void *buf, size_t count);
+extern ssize_t lxc_read_nointr(int fd, void *buf, size_t count);
 extern ssize_t lxc_read_nointr_expect(int fd, void *buf, size_t count,
 				      const void *expected_buf);
 #if HAVE_LIBGNUTLS
@@ -376,8 +403,8 @@ extern int sha1sum_file(char *fnam, unsigned char *md_value);
 
 /* read and write whole files */
 extern int lxc_write_to_file(const char *filename, const void *buf,
-			     size_t count, bool add_newline);
-extern int lxc_read_from_file(const char *filename, void* buf, size_t count);
+			     size_t count, bool add_newline, mode_t mode);
+extern int lxc_read_from_file(const char *filename, void *buf, size_t count);
 
 /* convert variadic argument lists to arrays (for execl type argument lists) */
 extern char** lxc_va_arg_list_to_argv(va_list ap, size_t skip, int do_strdup);
@@ -426,6 +453,7 @@ extern void lxc_free_array(void **array, lxc_free_fn element_free_fn);
 extern size_t lxc_array_len(void **array);
 
 extern void **lxc_append_null_to_array(void **array, size_t count);
+extern void remove_trailing_newlines(char *l);
 
 /* initialize rand with urandom */
 extern int randseed(bool);
@@ -474,6 +502,7 @@ extern bool dir_exists(const char *path);
 #define FNV1A_64_INIT ((uint64_t)0xcbf29ce484222325ULL)
 extern uint64_t fnv_64a_buf(void *buf, size_t len, uint64_t hval);
 
+extern bool is_shared_mountpoint(const char *path);
 extern int detect_shared_rootfs(void);
 extern bool detect_ramfs_rootfs(void);
 extern char *on_path(const char *cmd, const char *rootfs);
@@ -495,7 +524,7 @@ extern int lxc_count_file_lines(const char *fn);
 extern int lxc_preserve_ns(const int pid, const char *ns);
 
 /* Check whether a signal is blocked by a process. */
-extern bool task_blocking_signal(pid_t pid, int signal);
+extern bool task_blocks_signal(pid_t pid, int signal);
 
 /* Helper functions to parse numbers. */
 extern int lxc_safe_uint(const char *numstr, unsigned int *converted);
@@ -503,6 +532,7 @@ extern int lxc_safe_int(const char *numstr, int *converted);
 extern int lxc_safe_long(const char *numstr, long int *converted);
 extern int lxc_safe_long_long(const char *numstr, long long int *converted);
 extern int lxc_safe_ulong(const char *numstr, unsigned long *converted);
+extern int lxc_safe_uint64(const char *numstr, uint64_t *converted, int base);
 /* Handles B, kb, MB, GB. Detects overflows and reports -ERANGE. */
 extern int parse_byte_size_string(const char *s, int64_t *converted);
 
@@ -586,5 +616,7 @@ static inline pid_t lxc_raw_gettid(void)
 
 /* Set a signal the child process will receive after the parent has died. */
 extern int lxc_set_death_signal(int signal);
+extern int fd_cloexec(int fd, bool cloexec);
+extern int recursive_destroy(char *dirname);
 
 #endif /* __LXC_UTILS_H */

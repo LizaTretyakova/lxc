@@ -18,6 +18,7 @@
  *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -32,7 +33,7 @@
 #include "conf.h"
 #include "utils.h"
 
-lxc_log_define(lxc_apparmor, lxc);
+lxc_log_define(apparmor, lsm);
 
 /* set by lsm_apparmor_drv_init if true */
 static int aa_enabled = 0;

@@ -662,3 +662,23 @@ rules to use them:
   #endif
   };
   ```
+
+#### Use `strlcpy()` instead of `strncpy()`
+
+When copying strings always use `strlcpy()` instead of `strncpy()`. The
+advantage of `strlcpy()` is that it will always append a `\0` byte to the
+string.
+
+Unless you have a valid reason to accept truncation you must check whether
+truncation has occurred, treat it as an error, and handle the error
+appropriately.
+
+#### Use `strlcat()` instead of `strncat()`
+
+When concatenating strings always use `strlcat()` instead of `strncat()`. The
+advantage of `strlcat()` is that it will always append a `\0` byte to the
+string.
+
+Unless you have a valid reason to accept truncation you must check whether
+truncation has occurred, treat it as an error, and handle the error
+appropriately.

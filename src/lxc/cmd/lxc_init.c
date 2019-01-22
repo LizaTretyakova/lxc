@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <libgen.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,7 +101,6 @@ static struct arguments my_args = {
 static void prevent_forking(void)
 {
 	FILE *f;
-	int fd = -1;
 	size_t len = 0;
 	char *line = NULL;
 	char path[MAXPATHLEN];
@@ -110,7 +110,7 @@ static void prevent_forking(void)
 		return;
 
 	while (getline(&line, &len, f) != -1) {
-		int ret;
+		int fd, ret;
 		char *p, *p2;
 
 		p = strchr(line, ':');
@@ -146,11 +146,11 @@ static void prevent_forking(void)
 			goto on_error;
 		}
 
-		if (write(fd, "1", 1) != 1)
+		ret = write(fd, "1", 1);
+		if (ret != 1)
 			SYSERROR("Failed to write to \"%s\"", path);
 
 		close(fd);
-		fd = -1;
 		break;
 	}
 
@@ -267,7 +267,7 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		exit(EXIT_FAILURE);
 
-	ret = sigprocmask(SIG_SETMASK, &mask, &omask);
+	ret = pthread_sigmask(SIG_SETMASK, &mask, &omask);
 	if (ret < 0)
 		exit(EXIT_FAILURE);
 
@@ -328,15 +328,19 @@ int main(int argc, char *argv[])
 		/* restore default signal handlers */
 		for (i = 1; i < NSIG; i++) {
 			sighandler_t sigerr;
+
+			if (i == SIGILL || i == SIGSEGV || i == SIGBUS ||
+			    i == SIGSTOP || i == SIGKILL || i == 32 || i == 33)
+				continue;
+
 			sigerr = signal(i, SIG_DFL);
 			if (sigerr == SIG_ERR) {
-				DEBUG("%s - Failed to reset to default action "
-				      "for signal \"%d\": %d", strerror(errno),
-				      i, pid);
+				SYSDEBUG("Failed to reset to default action "
+				         "for signal \"%d\": %d", i, pid);
 			}
 		}
 
-		ret = sigprocmask(SIG_SETMASK, &omask, NULL);
+		ret = pthread_sigmask(SIG_SETMASK, &omask, NULL);
 		if (ret < 0) {
 			SYSERROR("Failed to set signal mask");
 			exit(EXIT_FAILURE);
@@ -352,7 +356,7 @@ int main(int argc, char *argv[])
 		NOTICE("Exec'ing \"%s\"", my_args.argv[0]);
 
 		ret = execvp(my_args.argv[0], my_args.argv);
-		ERROR("%s - Failed to exec \"%s\"", strerror(errno), my_args.argv[0]);
+		SYSERROR("Failed to exec \"%s\"", my_args.argv[0]);
 		exit(ret);
 	}
 
@@ -364,7 +368,7 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		exit(EXIT_FAILURE);
 
-	ret = sigprocmask(SIG_SETMASK, &omask, NULL);
+	ret = pthread_sigmask(SIG_SETMASK, &omask, NULL);
 	if (ret < 0) {
 		SYSERROR("Failed to set signal mask");
 		exit(EXIT_FAILURE);
@@ -404,8 +408,7 @@ int main(int argc, char *argv[])
 				} else {
 					ret = kill(-1, SIGTERM);
 					if (ret < 0)
-						DEBUG("%s - Failed to send SIGTERM to "
-						      "all children", strerror(errno));
+						SYSDEBUG("Failed to send SIGTERM to all children");
 				}
 				alarm(1);
 			}
@@ -419,16 +422,14 @@ int main(int argc, char *argv[])
 			} else {
 				ret = kill(-1, SIGKILL);
 				if (ret < 0)
-					DEBUG("%s - Failed to send SIGTERM to "
-					      "all children", strerror(errno));
+					SYSDEBUG("Failed to send SIGTERM to all children");
 			}
 			break;
 		}
 		default:
 			ret = kill(pid, was_interrupted);
 			if (ret < 0)
-				DEBUG("%s - Failed to send signal \"%d\" to "
-				      "%d", strerror(errno), was_interrupted, pid);
+				SYSDEBUG("Failed to send signal \"%d\" to %d", was_interrupted, pid);
 			break;
 		}
 		ret = EXIT_SUCCESS;
@@ -442,8 +443,7 @@ int main(int argc, char *argv[])
 			if (errno == EINTR)
 				continue;
 
-			ERROR("%s - Failed to wait on child %d",
-			      strerror(errno), pid);
+			SYSERROR("Failed to wait on child %d", pid);
 			goto out;
 		}
 

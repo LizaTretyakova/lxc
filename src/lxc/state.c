@@ -21,6 +21,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -43,7 +44,7 @@
 #include "monitor.h"
 #include "start.h"
 
-lxc_log_define(lxc_state, lxc);
+lxc_log_define(state, lxc);
 
 static const char *const strstate[] = {
     "STOPPED",  "STARTING", "RUNNING", "STOPPING",
@@ -72,12 +73,7 @@ lxc_state_t lxc_str2state(const char *state)
 
 lxc_state_t lxc_getstate(const char *name, const char *lxcpath)
 {
-	extern lxc_state_t freezer_state(const char *name, const char *lxcpath);
-
-	lxc_state_t state = freezer_state(name, lxcpath);
-	if (state != FROZEN && state != FREEZING)
-		state = lxc_cmd_get_state(name, lxcpath);
-	return state;
+	return lxc_cmd_get_state(name, lxcpath);
 }
 
 static int fillwaitedstates(const char *strstates, lxc_state_t *states)
@@ -109,7 +105,7 @@ static int fillwaitedstates(const char *strstates, lxc_state_t *states)
 extern int lxc_wait(const char *lxcname, const char *states, int timeout,
 		    const char *lxcpath)
 {
-	int state;
+	int state = -1;
 	lxc_state_t s[MAX_STATE] = {0};
 
 	if (fillwaitedstates(states, s))
@@ -132,6 +128,11 @@ extern int lxc_wait(const char *lxcname, const char *states, int timeout,
 			return -1;
 
 		sleep(1);
+	}
+
+	if (state < 0) {
+		ERROR("Failed to retrieve state from monitor");
+		return -1;
 	}
 
 	TRACE("Retrieved state of container %s", lxc_state2str(state));

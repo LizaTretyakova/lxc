@@ -263,7 +263,7 @@ AM_CONDITIONAL([ENABLE_GNUTLS], [test "x$enable_gnutls" = "xyes"])
 
 AM_COND_IF([ENABLE_GNUTLS],
 	[AC_CHECK_HEADER([gnutls/gnutls.h],[],[AC_MSG_ERROR([You must install the GnuTLS development package in order to compile lxc])])
-	AC_CHECK_LIB([gnutls], [gnutls_hash_fast],[],[AC_MSG_ERROR([You must install the GnuTLS development package in order to compile lxc])])
+	AC_CHECK_LIB([gnutls], [gnutls_hash_fast],[true],[AC_MSG_ERROR([You must install the GnuTLS development package in order to compile lxc])])
 	AC_SUBST([GNUTLS_LIBS], [-lgnutls])])
 
 # SELinux
@@ -600,6 +600,10 @@ AC_CHECK_LIB(pthread, main)
 AC_CHECK_FUNCS(statvfs)
 AC_CHECK_LIB(util, openpty)
 AC_CHECK_FUNCS([openpty hasmntopt setmntent endmntent utmpxname])
+AC_CHECK_FUNCS([getgrgid_r],
+	AM_CONDITIONAL(HAVE_GETGRGID_R, true)
+	AC_DEFINE(HAVE_GETGRGID_R,1,[Have getgrgid_r]),
+	AM_CONDITIONAL(HAVE_GETGRGID_R, false))
 AC_CHECK_FUNCS([getline],
 	AM_CONDITIONAL(HAVE_GETLINE, true)
 	AC_DEFINE(HAVE_GETLINE,1,[Have getline]),
@@ -620,6 +624,18 @@ AC_CHECK_FUNCS([prlimit64],
 	AM_CONDITIONAL(HAVE_PRLIMIT64, true)
 	AC_DEFINE(HAVE_PRLIMIT64,1,[Have prlimit64]),
 	AM_CONDITIONAL(HAVE_PRLIMIT64, false))
+AC_CHECK_FUNCS([pthread_setcancelstate],
+	AM_CONDITIONAL(HAVE_PTHREAD_SETCANCELSTATE, true)
+	AC_DEFINE(HAVE_PTHREAD_SETCANCELSTATE,1,[Have pthread_setcancelstate]),
+	AM_CONDITIONAL(HAVE_PTHREAD_SETCANCELSTATE, false))
+AC_CHECK_FUNCS([strlcpy],
+	AM_CONDITIONAL(HAVE_STRLCPY, true)
+	AC_DEFINE(HAVE_STRLCPY,1,[Have strlcpy]),
+	AM_CONDITIONAL(HAVE_STRLCPY, false))
+AC_CHECK_FUNCS([strlcat],
+	AM_CONDITIONAL(HAVE_STRLCAT, true)
+	AC_DEFINE(HAVE_STRLCAT,1,[Have strlcat]),
+	AM_CONDITIONAL(HAVE_STRLCAT, false))
 
 # Check for some libraries
 AX_PTHREAD

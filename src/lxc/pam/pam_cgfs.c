@@ -59,6 +59,14 @@
 
 #include "utils.h"
 
+#ifndef HAVE_STRLCPY
+#include "include/strlcpy.h"
+#endif
+
+#ifndef HAVE_STRLCAT
+#include "include/strlcat.h"
+#endif
+
 #define pam_cgfs_debug_stream(stream, format, ...)                                \
 	do {                                                                   \
 		fprintf(stream, "%s: %d: %s: " format, __FILE__, __LINE__,     \
@@ -223,6 +231,20 @@ static bool cgv2_prune_empty_cgroups(const char *user);
 static bool cgv2_remove(const char *cgroup);
 static bool is_cgv2(char *line);
 
+static int do_mkdir(const char *path, mode_t mode)
+{
+	int saved_errno;
+	mode_t mask;
+	int r;
+
+	mask = umask(0);
+	r = mkdir(path, mode);
+	saved_errno = errno;
+	umask(mask);
+	errno = saved_errno;
+	return (r);
+}
+
 /* Create directory and (if necessary) its parents. */
 static bool mkdir_parent(const char *root, char *path)
 {
@@ -252,7 +274,7 @@ static bool mkdir_parent(const char *root, char *path)
 		if (file_exists(path))
 			goto next;
 
-		if (mkdir(path, 0755) < 0) {
+		if (do_mkdir(path, 0755) < 0) {
 			pam_cgfs_debug("Failed to create %s: %s.\n", path, strerror(errno));
 			return false;
 		}
@@ -510,9 +532,6 @@ static int recursive_rmdir(char *dirname)
 	while ((direntp = readdir(dir))) {
 		struct stat st;
 		char *pathname;
-
-		if (!direntp)
-			break;
 
 		if (!strcmp(direntp->d_name, ".") ||
 		    !strcmp(direntp->d_name, ".."))
@@ -1509,14 +1528,33 @@ static void cg_escape(void)
 /* Get uid and gid for @user. */
 static bool get_uid_gid(const char *user, uid_t *uid, gid_t *gid)
 {
-	struct passwd *pwent;
+	struct passwd pwent;
+	struct passwd *pwentp = NULL;
+	char *buf;
+	size_t bufsize;
+	int ret;
 
-	pwent = getpwnam(user);
-	if (!pwent)
+	bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
+	if (bufsize == -1)
+		bufsize = 1024;
+
+	buf = malloc(bufsize);
+	if (!buf)
 		return false;
 
-	*uid = pwent->pw_uid;
-	*gid = pwent->pw_gid;
+	ret = getpwnam_r(user, &pwent, buf, bufsize, &pwentp);
+	if (!pwentp) {
+		if (ret == 0)
+			mysyslog(LOG_ERR,
+				 "Could not find matched password record\n", NULL);
+
+		free(buf);
+		return false;
+	}
+
+	*uid = pwent.pw_uid;
+	*gid = pwent.pw_gid;
+	free(buf);
 
 	return true;
 }
@@ -1583,6 +1621,7 @@ static char *string_join(const char *sep, const char **parts, bool use_as_prefix
 	char **p;
 	size_t sep_len = strlen(sep);
 	size_t result_len = use_as_prefix * sep_len;
+	size_t buf_len;
 
 	if (!parts)
 		return NULL;
@@ -1591,16 +1630,18 @@ static char *string_join(const char *sep, const char **parts, bool use_as_prefix
 	for (p = (char **)parts; *p; p++)
 		result_len += (p > (char **)parts) * sep_len + strlen(*p);
 
-	result = calloc(result_len + 1, sizeof(char));
+	buf_len = result_len + 1;
+	result = calloc(buf_len, sizeof(char));
 	if (!result)
 		return NULL;
 
 	if (use_as_prefix)
-		strcpy(result, sep);
+		(void)strlcpy(result, sep, buf_len * sizeof(char));
+
 	for (p = (char **)parts; *p; p++) {
 		if (p > (char **)parts)
-			strcat(result, sep);
-		strcat(result, *p);
+			(void)strlcat(result, sep, buf_len * sizeof(char));
+		(void)strlcat(result, *p, buf_len * sizeof(char));
 	}
 
 	return result;
@@ -1963,7 +2004,7 @@ static bool cgv1_handle_cpuset_hierarchy(struct cgv1_hierarchy *h,
 	cgpath = must_make_path(h->mountpoint, h->base_cgroup, cgroup, NULL);
 	if (slash)
 		*slash = '/';
-	if (mkdir(cgpath, 0755) < 0 && errno != EEXIST) {
+	if (do_mkdir(cgpath, 0755) < 0 && errno != EEXIST) {
 		pam_cgfs_debug("Failed to create '%s'", cgpath);
 		free(cgpath);
 		return false;

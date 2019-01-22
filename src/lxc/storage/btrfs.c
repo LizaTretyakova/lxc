@@ -42,6 +42,14 @@
 #include "storage.h"
 #include "utils.h"
 
+#ifndef HAVE_STRLCPY
+#include "include/strlcpy.h"
+#endif
+
+#ifndef HAVE_STRLCAT
+#include "include/strlcat.h"
+#endif
+
 lxc_log_define(btrfs, lxc);
 
 /*
@@ -54,8 +62,8 @@ char *get_btrfs_subvol_path(int fd, u64 dir_id, u64 objid, char *name,
 			    int name_len)
 {
 	struct btrfs_ioctl_ino_lookup_args args;
-	int ret, e;
-	size_t len;
+	int ret;
+	size_t len, retlen;
 	char *retpath;
 
 	memset(&args, 0, sizeof(args));
@@ -63,12 +71,11 @@ char *get_btrfs_subvol_path(int fd, u64 dir_id, u64 objid, char *name,
 	args.objectid = objid;
 
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &args);
-	e = errno;
 	if (ret) {
-		ERROR("Failed to lookup path for %llu %llu %s - %s\n",
-				 (unsigned long long) dir_id,
-				 (unsigned long long) objid,
-				 name, strerror(e));
+		SYSERROR("Failed to lookup path for %llu %llu %s",
+		         (unsigned long long) dir_id,
+		         (unsigned long long) objid,
+		         name);
 		return NULL;
 	} else
 		INFO("Got path for %llu %llu - %s\n",
@@ -84,18 +91,33 @@ char *get_btrfs_subvol_path(int fd, u64 dir_id, u64 objid, char *name,
 		retpath = malloc(len);
 		if (!retpath)
 			return NULL;
-		strcpy(retpath, args.name);
-		strcat(retpath, "/");
-		strncat(retpath, name, name_len);
+
+		(void)strlcpy(retpath, args.name, len);
+		(void)strlcat(retpath, "/", len);
+
+		retlen = strlcat(retpath, name, len);
+		if (retlen >= len) {
+			ERROR("Failed to append name - %s\n", name);
+			free(retpath);
+			return NULL;
+		}
 	} else {
 		/* we're at the root of ref_tree */
 		len = name_len + 1;
 		retpath = malloc(len);
 		if (!retpath)
 			return NULL;
+
 		*retpath = '\0';
-		strncat(retpath, name, name_len);
+
+		retlen = strlcat(retpath, name, len);
+		if (retlen >= len) {
+			ERROR("Failed to append name - %s\n", name);
+			free(retpath);
+			return NULL;
+		}
 	}
+
 	return retpath;
 }
 
@@ -109,8 +131,7 @@ int btrfs_list_get_path_rootid(int fd, u64 *treeid)
 
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &args);
 	if (ret < 0) {
-		WARN("Warning: can't perform the search -%s\n",
-				strerror(errno));
+		SYSWARN("Warning: can't perform the search");
 		return ret;
 	}
 	*treeid = args.treeid;
@@ -223,6 +244,7 @@ int btrfs_umount(struct lxc_storage *bdev)
 static int btrfs_subvolume_create(const char *path)
 {
 	int ret, saved_errno;
+	size_t retlen;
 	struct btrfs_ioctl_vol_args args;
 	char *p, *newfull;
 	int fd = -1;
@@ -248,8 +270,12 @@ static int btrfs_subvolume_create(const char *path)
 	}
 
 	memset(&args, 0, sizeof(args));
-	strncpy(args.name, p + 1, BTRFS_SUBVOL_NAME_MAX);
-	args.name[BTRFS_SUBVOL_NAME_MAX - 1] = 0;
+	retlen = strlcpy(args.name, p + 1, BTRFS_SUBVOL_NAME_MAX);
+	if (retlen >= BTRFS_SUBVOL_NAME_MAX) {
+		free(newfull);
+		close(fd);
+		return -E2BIG;
+	}
 
 	ret = ioctl(fd, BTRFS_IOC_SUBVOL_CREATE, &args);
 	saved_errno = errno;
@@ -303,6 +329,7 @@ out:
 
 int btrfs_snapshot(const char *orig, const char *new)
 {
+	size_t retlen;
 	struct btrfs_ioctl_vol_args_v2 args;
 	char *newdir, *newname;
 	char *newfull = NULL;
@@ -328,9 +355,9 @@ int btrfs_snapshot(const char *orig, const char *new)
 		goto out;
 
 	memset(&args, 0, sizeof(args));
-	args.fd = fd;
-	strncpy(args.name, newname, BTRFS_SUBVOL_NAME_MAX);
-	args.name[BTRFS_SUBVOL_NAME_MAX - 1] = 0;
+	retlen = strlcpy(args.name, newname, BTRFS_SUBVOL_NAME_MAX);
+	if (retlen >= BTRFS_SUBVOL_NAME_MAX)
+		goto out;
 
 	ret = ioctl(fddst, BTRFS_IOC_SNAP_CREATE_V2, &args);
 	saved_errno = errno;
@@ -498,6 +525,7 @@ bool btrfs_create_snapshot(struct lxc_conf *conf, struct lxc_storage *orig,
 static int btrfs_do_destroy_subvol(const char *path)
 {
 	int ret, fd = -1;
+	size_t retlen;
 	struct btrfs_ioctl_vol_args  args;
 	char *p, *newfull = strdup(path);
 
@@ -522,8 +550,13 @@ static int btrfs_do_destroy_subvol(const char *path)
 	}
 
 	memset(&args, 0, sizeof(args));
-	strncpy(args.name, p+1, BTRFS_SUBVOL_NAME_MAX);
-	args.name[BTRFS_SUBVOL_NAME_MAX-1] = 0;
+	retlen = strlcpy(args.name, p+1, BTRFS_SUBVOL_NAME_MAX);
+	if (retlen >= BTRFS_SUBVOL_NAME_MAX) {
+		free(newfull);
+		close(fd);
+		return -E2BIG;
+	}
+
 	ret = ioctl(fd, BTRFS_IOC_SNAP_DESTROY, &args);
 	INFO("btrfs: snapshot destroy ioctl returned %d for %s", ret, path);
 	if (ret < 0 && errno == EPERM)
@@ -577,22 +610,29 @@ static bool update_tree_node(struct mytree_node *n, u64 id, u64 parent,
 {
 	if (id)
 		n->objid = id;
+
 	if (parent)
 		n->parentid = parent;
+
 	if (name) {
 		n->name = malloc(name_len + 1);
 		if (!n->name)
 			return false;
-		strncpy(n->name, name, name_len);
-		n->name[name_len] = '\0';
+
+		(void)strlcpy(n->name, name, name_len + 1);
 	}
+
 	if (dirname) {
-		n->dirname = malloc(strlen(dirname) + 1);
+		size_t len;
+
+		len = strlen(dirname);
+		n->dirname = malloc(len + 1);
 		if (!n->dirname) {
 			free(n->name);
 			return false;
 		}
-		strcpy(n->dirname, dirname);
+
+		(void)strlcpy(n->dirname, dirname, len + 1);
 	}
 	return true;
 }
@@ -639,7 +679,7 @@ static void free_btrfs_tree(struct my_btrfs_tree *tree)
 static bool do_remove_btrfs_children(struct my_btrfs_tree *tree, u64 root_id,
 				     const char *path)
 {
-	int i;
+	int i, ret;
 	char *newpath;
 	size_t len;
 
@@ -655,7 +695,11 @@ static bool do_remove_btrfs_children(struct my_btrfs_tree *tree, u64 root_id,
 				ERROR("Out of memory");
 				return false;
 			}
-			snprintf(newpath, len, "%s/%s", path, tree->nodes[i].dirname);
+			ret = snprintf(newpath, len, "%s/%s", path, tree->nodes[i].dirname);
+			if (ret < 0 || ret >= len) {
+				free(newpath);
+				return false;
+			}
 			if (!do_remove_btrfs_children(tree, tree->nodes[i].objid, newpath)) {
 				ERROR("Failed to prune %s\n", tree->nodes[i].name);
 				free(newpath);

@@ -21,12 +21,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#define _GNU_SOURCE
 #include <sys/prctl.h>
 
 #include "initutils.h"
 #include "log.h"
 
-lxc_log_define(lxc_initutils, lxc);
+#ifndef HAVE_STRLCPY
+#include "include/strlcpy.h"
+#endif
+
+lxc_log_define(initutils, lxc);
 
 static char *copy_global_config_value(char *p)
 {
@@ -35,14 +40,17 @@ static char *copy_global_config_value(char *p)
 
 	if (len < 1)
 		return NULL;
+
 	if (p[len-1] == '\n') {
 		p[len-1] = '\0';
 		len--;
 	}
-	retbuf = malloc(len+1);
+
+	retbuf = malloc(len + 1);
 	if (!retbuf)
 		return NULL;
-	strcpy(retbuf, p);
+
+	(void)strlcpy(retbuf, p, len + 1);
 	return retbuf;
 }
 
@@ -355,9 +363,9 @@ int setproctitle(char *title)
 
 	ret = prctl(PR_SET_MM, PR_SET_MM_MAP, (long) &prctl_map, sizeof(prctl_map), 0);
 	if (ret == 0)
-		strcpy((char*)arg_start, title);
+		(void)strlcpy((char*)arg_start, title, len);
 	else
-		INFO("setting cmdline failed - %s", strerror(errno));
+		SYSINFO("setting cmdline failed");
 
 	return ret;
 }

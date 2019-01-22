@@ -51,6 +51,10 @@
 #include <mntent.h>
 #endif
 
+#ifndef HAVE_STRLCPY
+#include "include/strlcpy.h"
+#endif
+
 #define CRIU_VERSION		"2.0"
 
 #define CRIU_GITID_VERSION	"2.0"
@@ -59,7 +63,7 @@
 #define CRIU_IN_FLIGHT_SUPPORT	"2.4"
 #define CRIU_EXTERNAL_NOT_VETH	"2.8"
 
-lxc_log_define(lxc_criu, lxc);
+lxc_log_define(criu, lxc);
 
 struct criu_opts {
 	/* the thing to hook to stdout and stderr for logging */
@@ -167,7 +171,7 @@ static int cmp_version(const char *v1, const char *v2)
 	return -1;
 }
 
-static void exec_criu(struct criu_opts *opts)
+static void exec_criu(struct cgroup_ops *cgroup_ops, struct criu_opts *opts)
 {
 	char **argv, log[PATH_MAX];
 	int static_args = 23, argc = 0, i, ret;
@@ -186,7 +190,7 @@ static void exec_criu(struct criu_opts *opts)
 	 * /actual/ root cgroup so that lxcfs thinks criu has enough rights to
 	 * see all cgroups.
 	 */
-	if (!cgroup_escape()) {
+	if (!cgroup_ops->escape(cgroup_ops)) {
 		ERROR("failed to escape cgroups");
 		return;
 	}
@@ -244,8 +248,8 @@ static void exec_criu(struct criu_opts *opts)
 		return;
 	}
 
-	if (cgroup_num_hierarchies() > 0)
-		static_args += 2 * cgroup_num_hierarchies();
+	if (cgroup_ops->num_hierarchies(cgroup_ops) > 0)
+		static_args += 2 * cgroup_ops->num_hierarchies(cgroup_ops);
 
 	if (opts->user->verbose)
 		static_args++;
@@ -302,11 +306,11 @@ static void exec_criu(struct criu_opts *opts)
 	DECLARE_ARG("-o");
 	DECLARE_ARG(log);
 
-	for (i = 0; i < cgroup_num_hierarchies(); i++) {
+	for (i = 0; i < cgroup_ops->num_hierarchies(cgroup_ops); i++) {
 		char **controllers = NULL, *fullname;
 		char *path, *tmp;
 
-		if (!cgroup_get_hierarchies(i, &controllers)) {
+		if (!cgroup_ops->get_hierarchies(cgroup_ops, i, &controllers)) {
 			ERROR("failed to get hierarchy %d", i);
 			goto err;
 		}
@@ -324,7 +328,7 @@ static void exec_criu(struct criu_opts *opts)
 		} else {
 			const char *p;
 
-			p = cgroup_get_cgroup(opts->handler, controllers[0]);
+			p = cgroup_ops->get_cgroup(cgroup_ops, controllers[0]);
 			if (!p) {
 				ERROR("failed to get cgroup path for %s", controllers[0]);
 				goto err;
@@ -536,6 +540,7 @@ static void exec_criu(struct criu_opts *opts)
 		argv = m;
 
 		lxc_list_for_each(it, &opts->c->lxc_conf->network) {
+			size_t retlen;
 			char eth[128], *veth;
 			char *fmt;
 			struct lxc_netdev *n = it->elem;
@@ -552,9 +557,9 @@ static void exec_criu(struct criu_opts *opts)
 			}
 
 			if (n->name[0] != '\0') {
-				if (strlen(n->name) >= sizeof(eth))
+				retlen = strlcpy(eth, n->name, sizeof(eth));
+				if (retlen >= sizeof(eth))
 					goto err;
-				strncpy(eth, n->name, sizeof(eth));
 			} else {
 				ret = snprintf(eth, sizeof(eth), "eth%d", netnr);
 				if (ret < 0 || ret >= sizeof(eth))
@@ -863,13 +868,13 @@ static bool criu_ok(struct lxc_container *c, char **criu_version)
 {
 	struct lxc_list *it;
 
-	if (!criu_version_ok(criu_version))
-		return false;
-
 	if (geteuid()) {
 		ERROR("Must be root to checkpoint");
 		return false;
 	}
+
+	if (!criu_version_ok(criu_version))
+		return false;
 
 	/* We only know how to restore containers with veth networks. */
 	lxc_list_for_each(it, &c->lxc_conf->network) {
@@ -882,6 +887,10 @@ static bool criu_ok(struct lxc_container *c, char **criu_version)
 			break;
 		default:
 			ERROR("Found un-dumpable network: %s (%s)", lxc_net_type_to_str(n->type), n->name);
+			if (criu_version) {
+				free(*criu_version);
+				*criu_version = NULL;
+			}
 			return false;
 		}
 	}
@@ -891,6 +900,7 @@ static bool criu_ok(struct lxc_container *c, char **criu_version)
 
 static bool restore_net_info(struct lxc_container *c)
 {
+	int ret;
 	struct lxc_list *it;
 	bool has_error = true;
 
@@ -904,14 +914,16 @@ static bool restore_net_info(struct lxc_container *c)
 		if (netdev->type != LXC_NET_VETH)
 			continue;
 
-		snprintf(template, sizeof(template), "vethXXXXXX");
+		ret = snprintf(template, sizeof(template), "vethXXXXXX");
+		if (ret < 0 || ret >= sizeof(template))
+			goto out_unlock;
 
 		if (netdev->priv.veth_attr.pair[0] == '\0' &&
 		    netdev->priv.veth_attr.veth1[0] == '\0') {
 			if (!lxc_mkifname(template))
 				goto out_unlock;
 
-			strcpy(netdev->priv.veth_attr.veth1, template);
+			(void)strlcpy(netdev->priv.veth_attr.veth1, template, IFNAMSIZ);
 		}
 	}
 
@@ -932,6 +944,7 @@ static void do_restore(struct lxc_container *c, int status_pipe, struct migrate_
 	struct lxc_handler *handler;
 	int status = 0;
 	int pipes[2] = {-1, -1};
+	struct cgroup_ops *cgroup_ops;
 
 	/* Try to detach from the current controlling tty if it exists.
 	 * Othwerise, lxc_init (via lxc_console) will attach the container's
@@ -953,12 +966,12 @@ static void do_restore(struct lxc_container *c, int status_pipe, struct migrate_
 	if (lxc_init(c->name, handler) < 0)
 		goto out;
 
-	if (!cgroup_init(handler)) {
-		ERROR("failed initing cgroups");
+	cgroup_ops = cgroup_init(NULL);
+	if (!cgroup_ops)
 		goto out_fini_handler;
-	}
+	handler->cgroup_ops = cgroup_ops;
 
-	if (!cgroup_create(handler)) {
+	if (!cgroup_ops->create(cgroup_ops, handler)) {
 		ERROR("failed creating groups");
 		goto out_fini_handler;
 	}
@@ -970,7 +983,7 @@ static void do_restore(struct lxc_container *c, int status_pipe, struct migrate_
 
 	ret = resolve_clone_flags(handler);
 	if (ret < 0) {
-		ERROR("%s - Unsupported clone flag specified", strerror(errno));
+		SYSERROR("Unsupported clone flag specified");
 		goto out_fini_handler;
 	}
 
@@ -1047,7 +1060,7 @@ static void do_restore(struct lxc_container *c, int status_pipe, struct migrate_
 		os.console_name = c->lxc_conf->console.name;
 
 		/* exec_criu() returning is an error */
-		exec_criu(&os);
+		exec_criu(cgroup_ops, &os);
 		umount(rootfs->mount);
 		rmdir(rootfs->mount);
 		goto out_fini_handler;
@@ -1233,6 +1246,7 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 	ret = pipe(criuout);
 	if (ret < 0) {
 		SYSERROR("pipe() failed");
+		free(criu_version);
 		return false;
 	}
 
@@ -1248,16 +1262,21 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 	if (pid == 0) {
 		struct criu_opts os;
 		struct lxc_handler h;
+		struct cgroup_ops *cgroup_ops;
 
 		close(criuout[0]);
 
 		lxc_zero_handler(&h);
 
 		h.name = c->name;
-		if (!cgroup_init(&h)) {
+
+		cgroup_ops = cgroup_init(NULL);
+		if (!cgroup_ops) {
 			ERROR("failed to cgroup_init()");
 			_exit(EXIT_FAILURE);
+			return -1;
 		}
+		h.cgroup_ops = cgroup_ops;
 
 		os.pipefd = criuout[1];
 		os.action = mode;
@@ -1273,7 +1292,7 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 		}
 
 		/* exec_criu() returning is an error */
-		exec_criu(&os);
+		exec_criu(cgroup_ops, &os);
 		free(criu_version);
 		_exit(EXIT_FAILURE);
 	} else {
@@ -1288,6 +1307,7 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 		if (w == -1) {
 			SYSERROR("waitpid");
 			close(criuout[0]);
+			free(criu_version);
 			return false;
 		}
 
@@ -1297,7 +1317,11 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 			SYSERROR("read");
 			n = 0;
 		}
-		buf[n] = 0;
+
+		if (n == sizeof(buf))
+			buf[n-1] = 0;
+		else
+			buf[n] = 0;
 
 		if (WIFEXITED(status)) {
 			if (WEXITSTATUS(status)) {
@@ -1316,6 +1340,8 @@ static bool do_dump(struct lxc_container *c, char *mode, struct migrate_opts *op
 
 		if (!ret)
 			ERROR("criu output: %s", buf);
+
+		free(criu_version);
 		return ret;
 	}
 fail:
@@ -1355,9 +1381,6 @@ bool __criu_restore(struct lxc_container *c, struct migrate_opts *opts)
 	int pipefd[2];
 	char *criu_version = NULL;
 
-	if (!criu_ok(c, &criu_version))
-		return false;
-
 	if (geteuid()) {
 		ERROR("Must be root to restore");
 		return false;
@@ -1368,10 +1391,17 @@ bool __criu_restore(struct lxc_container *c, struct migrate_opts *opts)
 		return false;
 	}
 
+	if (!criu_ok(c, &criu_version)) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return false;
+	}
+
 	pid = fork();
 	if (pid < 0) {
 		close(pipefd[0]);
 		close(pipefd[1]);
+		free(criu_version);
 		return false;
 	}
 
@@ -1382,6 +1412,7 @@ bool __criu_restore(struct lxc_container *c, struct migrate_opts *opts)
 	}
 
 	close(pipefd[1]);
+	free(criu_version);
 
 	nread = read(pipefd[0], &status, sizeof(status));
 	close(pipefd[0]);

@@ -19,13 +19,14 @@
  */
 
 #define _GNU_SOURCE
-#include <malloc.h>
-#include <stdio.h>
 #include <errno.h>
-#include <unistd.h>
 #include <fcntl.h>
-#include <stdlib.h>
+#include <malloc.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 #include <lxc/lxccontainer.h>
 
@@ -39,7 +40,7 @@
 
 #define MAX_STACKDEPTH 25
 
-lxc_log_define(lxc_lock, lxc);
+lxc_log_define(lxclock, lxc);
 
 #ifdef MUTEX_DEBUGGING
 static pthread_mutex_t thread_mutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
@@ -74,7 +75,7 @@ static void lock_mutex(pthread_mutex_t *l)
 
 	ret = pthread_mutex_lock(l);
 	if (ret != 0) {
-		fprintf(stderr, "%s - Failed acquire mutex", strerror(ret));
+		SYSERROR("Failed to acquire mutex");
 		dump_stacktrace();
 		_exit(EXIT_FAILURE);
 	}
@@ -86,7 +87,7 @@ static void unlock_mutex(pthread_mutex_t *l)
 
 	ret = pthread_mutex_unlock(l);
 	if (ret != 0) {
-		fprintf(stderr, "%s - Failed to release mutex", strerror(ret));
+		SYSERROR("Failed to release mutex");
 		dump_stacktrace();
 		_exit(EXIT_FAILURE);
 	}
@@ -110,6 +111,7 @@ static char *lxclock_name(const char *p, const char *n)
 	rundir = get_rundir();
 	if (!rundir)
 		return NULL;
+
 	len += strlen(rundir);
 
 	if ((dest = malloc(len)) == NULL) {
@@ -123,6 +125,7 @@ static char *lxclock_name(const char *p, const char *n)
 		free(rundir);
 		return NULL;
 	}
+
 	ret = mkdir_p(dest, 0755);
 	if (ret < 0) {
 		free(dest);
@@ -136,6 +139,7 @@ static char *lxclock_name(const char *p, const char *n)
 		free(dest);
 		return NULL;
 	}
+
 	return dest;
 }
 
@@ -147,11 +151,13 @@ static sem_t *lxc_new_unnamed_sem(void)
 	s = malloc(sizeof(*s));
 	if (!s)
 		return NULL;
+
 	ret = sem_init(s, 0, 1);
 	if (ret) {
 		free(s);
 		return NULL;
 	}
+
 	return s;
 }
 
@@ -170,6 +176,7 @@ struct lxc_lock *lxc_newlock(const char *lxcpath, const char *name)
 			free(l);
 			l = NULL;
 		}
+
 		goto out;
 	}
 
@@ -180,6 +187,7 @@ struct lxc_lock *lxc_newlock(const char *lxcpath, const char *name)
 		l = NULL;
 		goto out;
 	}
+
 	l->u.f.fd = -1;
 
 out:
@@ -199,10 +207,12 @@ int lxclock(struct lxc_lock *l, int timeout)
 				saved_errno = errno;
 		} else {
 			struct timespec ts;
+
 			if (clock_gettime(CLOCK_REALTIME, &ts) == -1) {
 				ret = -2;
 				goto out;
 			}
+
 			ts.tv_sec += timeout;
 			ret = sem_timedwait(l->u.sem, &ts);
 			if (ret < 0)
@@ -215,10 +225,12 @@ int lxclock(struct lxc_lock *l, int timeout)
 			ERROR("Error: timeout not supported with flock");
 			goto out;
 		}
+
 		if (!l->u.f.fname) {
 			ERROR("Error: filename not set for flock");
 			goto out;
 		}
+
 		if (l->u.f.fd == -1) {
 			l->u.f.fd = open(l->u.f.fname, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY, S_IWUSR | S_IRUSR);
 			if (l->u.f.fd == -1) {
@@ -227,9 +239,12 @@ int lxclock(struct lxc_lock *l, int timeout)
 				goto out;
 			}
 		}
+
 		memset(&lk, 0, sizeof(struct flock));
+
 		lk.l_type = F_WRLCK;
 		lk.l_whence = SEEK_SET;
+
 		ret = fcntl(l->u.f.fd, F_OFD_SETLKW, &lk);
 		if (ret < 0) {
 			if (errno == EINVAL)
@@ -261,14 +276,17 @@ int lxcunlock(struct lxc_lock *l)
 	case LXC_LOCK_FLOCK:
 		if (l->u.f.fd != -1) {
 			memset(&lk, 0, sizeof(struct flock));
+
 			lk.l_type = F_UNLCK;
 			lk.l_whence = SEEK_SET;
+
 			ret = fcntl(l->u.f.fd, F_OFD_SETLK, &lk);
 			if (ret < 0) {
 				if (errno == EINVAL)
 					ret = flock(l->u.f.fd, LOCK_EX | LOCK_NB);
 				saved_errno = errno;
 			}
+
 			close(l->u.f.fd);
 			l->u.f.fd = -1;
 		} else
@@ -291,6 +309,7 @@ void lxc_putlock(struct lxc_lock *l)
 {
 	if (!l)
 		return;
+
 	switch(l->type) {
 	case LXC_LOCK_ANON_SEM:
 		if (l->u.sem) {
@@ -304,6 +323,7 @@ void lxc_putlock(struct lxc_lock *l)
 			close(l->u.f.fd);
 			l->u.f.fd = -1;
 		}
+
 		free(l->u.f.fname);
 		l->u.f.fname = NULL;
 		break;
@@ -337,10 +357,12 @@ int container_disk_lock(struct lxc_container *c)
 
 	if ((ret = lxclock(c->privlock, 0)))
 		return ret;
+
 	if ((ret = lxclock(c->slock, 0))) {
 		lxcunlock(c->privlock);
 		return ret;
 	}
+
 	return 0;
 }
 

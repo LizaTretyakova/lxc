@@ -46,6 +46,10 @@
 #include "utils.h"
 #include "lxccontainer.h"
 
+#ifndef HAVE_STRLCPY
+#include "include/strlcpy.h"
+#endif
+
 /* We're logging in seconds and nanoseconds. Assuming that the underlying
  * datatype is currently at maximum a 64bit integer, we have a date string that
  * is of maximum length (2^64 - 1) * 2 = (21 + 21) = 42.
@@ -62,7 +66,7 @@ static char log_prefix[LXC_LOG_PREFIX_SIZE] = "lxc";
 static char *log_fname = NULL;
 static char *log_vmname = NULL;
 
-lxc_log_define(lxc_log, lxc);
+lxc_log_define(log, lxc);
 
 static int lxc_log_priority_to_syslog(int priority)
 {
@@ -98,6 +102,12 @@ static int log_append_syslog(const struct lxc_log_appender *appender,
 	char *msg;
 	int rc, len;
 	va_list args;
+	const char *log_container_name = log_vmname;
+
+#ifndef NO_LXC_CONF
+	if (current_config && !log_container_name)
+		log_container_name = current_config->name;
+#endif
 
 	if (!syslog_enable)
 		return 0;
@@ -105,9 +115,11 @@ static int log_append_syslog(const struct lxc_log_appender *appender,
 	va_copy(args, *event->vap);
 	len = vsnprintf(NULL, 0, event->fmt, args) + 1;
 	va_end(args);
+
 	msg = malloc(len * sizeof(char));
 	if (msg == NULL)
 		return 0;
+
 	rc = vsnprintf(msg, len, event->fmt, *event->vap);
 	if (rc == -1 || rc >= len) {
 		free(msg);
@@ -116,13 +128,14 @@ static int log_append_syslog(const struct lxc_log_appender *appender,
 
 	syslog(lxc_log_priority_to_syslog(event->priority),
 		"%s%s %s - %s:%s:%d - %s" ,
-		log_vmname ? log_vmname : "",
-		log_vmname ? ":" : "",
+		log_container_name ? log_container_name : "",
+		log_container_name ? ":" : "",
 		event->category,
 		event->locinfo->file, event->locinfo->func,
 		event->locinfo->line,
 		msg);
 	free(msg);
+
 	return 0;
 }
 
@@ -130,13 +143,26 @@ static int log_append_syslog(const struct lxc_log_appender *appender,
 static int log_append_stderr(const struct lxc_log_appender *appender,
 			     struct lxc_log_event *event)
 {
+	const char *log_container_name;
+
 	if (event->priority < LXC_LOG_LEVEL_ERROR)
 		return 0;
 
-	fprintf(stderr, "%s: %s%s", log_prefix, log_vmname ? log_vmname : "", log_vmname ? ": " : "");
-	fprintf(stderr, "%s: %s: %d ", event->locinfo->file, event->locinfo->func, event->locinfo->line);
+	log_container_name = log_vmname;
+
+#ifndef NO_LXC_CONF
+	if (current_config && !log_container_name)
+		log_container_name = current_config->name;
+#endif
+
+	fprintf(stderr, "%s: %s%s", log_prefix,
+		log_container_name ? log_container_name : "",
+		log_container_name ? ": " : "");
+	fprintf(stderr, "%s: %s: %d ", event->locinfo->file,
+		event->locinfo->func, event->locinfo->line);
 	vfprintf(stderr, event->fmt, *event->vap);
 	fprintf(stderr, "\n");
+
 	return 0;
 }
 
@@ -266,10 +292,16 @@ static int log_append_logfile(const struct lxc_log_appender *appender,
 	char date_time[LXC_LOG_TIME_SIZE];
 	int n, ret;
 	int fd_to_use = -1;
+	const char *log_container_name = log_vmname;
 
 #ifndef NO_LXC_CONF
-	if (!lxc_log_use_global_fd && current_config)
-		fd_to_use = current_config->logfd;
+	if (current_config) {
+		if (!lxc_log_use_global_fd)
+			fd_to_use = current_config->logfd;
+
+		if (!log_container_name)
+			log_container_name = current_config->name;
+	}
 #endif
 
 	if (fd_to_use == -1)
@@ -284,8 +316,8 @@ static int log_append_logfile(const struct lxc_log_appender *appender,
 	n = snprintf(buffer, sizeof(buffer),
 			"%s%s%s %s %-8s %s - %s:%s:%d - ",
 			log_prefix,
-			log_vmname ? " " : "",
-			log_vmname ? log_vmname : "",
+			log_container_name ? " " : "",
+			log_container_name ? log_container_name : "",
 			date_time,
 			lxc_log_priority_to_string(event->priority),
 			event->category,
@@ -352,7 +384,7 @@ static int build_dir(const char *name)
 	/* Make copy of string since we'll be modifying it. */
 	n = strdup(name);
 	if (!n) {
-		ERROR("Out of memory while creating directory '%s'.", name);
+		ERROR("Out of memory while creating directory '%s'", name);
 		return -1;
 	}
 
@@ -361,16 +393,18 @@ static int build_dir(const char *name)
 		if (*p != '/')
 			continue;
 		*p = '\0';
+
 		if (access(n, F_OK)) {
 			ret = lxc_unpriv(mkdir(n, 0755));
 			if (ret && errno != EEXIST) {
-				SYSERROR("failed to create directory '%s'.", n);
+				SYSERROR("Failed to create directory '%s'", n);
 				free(n);
 				return -1;
 			}
 		}
 		*p = '/';
 	}
+
 	free(n);
 	return 0;
 }
@@ -384,8 +418,7 @@ static int log_open(const char *name)
 	fd = lxc_unpriv(open(name, O_CREAT | O_WRONLY |
 			     O_APPEND | O_CLOEXEC, 0666));
 	if (fd == -1) {
-		ERROR("failed to open log file \"%s\" : %s", name,
-		      strerror(errno));
+		SYSERROR("Failed to open log file \"%s\"", name);
 		return -1;
 	}
 
@@ -394,7 +427,7 @@ static int log_open(const char *name)
 
 	newfd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
 	if (newfd == -1)
-		ERROR("failed to dup log fd %d : %s", fd, strerror(errno));
+		SYSERROR("Failed to dup log fd %d", fd);
 
 	close(fd);
 	return newfd;
@@ -438,6 +471,7 @@ static char *build_log_path(const char *name, const char *lxcpath)
 		len += strlen(lxcpath) + 1 + strlen(name) + 1;  /* add "/$container_name/" */
 	else
 		len += strlen(lxcpath) + 1;
+
 	p = malloc(len);
 	if (!p)
 		return p;
@@ -446,23 +480,27 @@ static char *build_log_path(const char *name, const char *lxcpath)
 		ret = snprintf(p, len, "%s/%s/%s.log", lxcpath, name, name);
 	else
 		ret = snprintf(p, len, "%s/%s.log", lxcpath, name);
-
 	if (ret < 0 || ret >= len) {
 		free(p);
 		return NULL;
 	}
+
 	return p;
 }
 
 extern void lxc_log_close(void)
 {
 	closelog();
+
 	free(log_vmname);
 	log_vmname = NULL;
+
 	if (lxc_log_fd == -1)
 		return;
+
 	close(lxc_log_fd);
 	lxc_log_fd = -1;
+
 	free(log_fname);
 	log_fname = NULL;
 }
@@ -496,8 +534,7 @@ static int __lxc_log_set_file(const char *fname, int create_dirs)
 	if (create_dirs)
 #endif
 	if (build_dir(fname)) {
-		ERROR("failed to create dir for log file \"%s\" : %s", fname,
-		      strerror(errno));
+		SYSERROR("Failed to create dir for log file \"%s\"", fname);
 		return -1;
 	}
 
@@ -516,7 +553,7 @@ static int _lxc_log_set_file(const char *name, const char *lxcpath, int create_d
 
 	logfile = build_log_path(name, lxcpath);
 	if (!logfile) {
-		ERROR("could not build log path");
+		ERROR("Could not build log path");
 		return -1;
 	}
 	ret = __lxc_log_set_file(logfile, create_dirs);
@@ -624,7 +661,7 @@ extern int lxc_log_init(struct lxc_log *log)
 	 * ignore failures and continue logging to console
 	 */
 	if (!log->file && ret != 0) {
-		INFO("Ignoring failure to open default logfile.");
+		INFO("Ignoring failure to open default logfile");
 		ret = 0;
 	}
 
@@ -639,9 +676,10 @@ extern int lxc_log_init(struct lxc_log *log)
 extern int lxc_log_set_level(int *dest, int level)
 {
 	if (level < 0 || level >= LXC_LOG_LEVEL_NOTSET) {
-		ERROR("invalid log priority %d", level);
+		ERROR("Invalid log priority %d", level);
 		return -1;
 	}
+
 	*dest = level;
 	return 0;
 }
@@ -654,8 +692,10 @@ extern int lxc_log_get_level(void)
 extern bool lxc_log_has_valid_level(void)
 {
 	int log_level = lxc_log_get_level();
+
 	if (log_level < 0 || log_level >= LXC_LOG_LEVEL_NOTSET)
 		return false;
+
 	return true;
 }
 
@@ -672,14 +712,14 @@ extern int lxc_log_set_file(int *fd, const char *fname)
 	}
 
 	if (build_dir(fname)) {
-		ERROR("failed to create dir for log file \"%s\" : %s", fname,
-				strerror(errno));
+		SYSERROR("Failed to create dir for log file \"%s\"", fname);
 		return -1;
 	}
 
 	*fd = log_open(fname);
 	if (*fd == -1)
 		return -errno;
+
 	return 0;
 }
 
@@ -690,8 +730,8 @@ extern const char *lxc_log_get_file(void)
 
 extern void lxc_log_set_prefix(const char *prefix)
 {
-	strncpy(log_prefix, prefix, sizeof(log_prefix));
-	log_prefix[sizeof(log_prefix) - 1] = 0;
+	/* We don't care if thte prefix is truncated. */
+	(void)strlcpy(log_prefix, prefix, sizeof(log_prefix));
 }
 
 extern const char *lxc_log_get_prefix(void)

@@ -21,6 +21,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -31,7 +32,7 @@
 #include "log.h"
 #include "lsm.h"
 
-lxc_log_define(lxc_lsm, lxc);
+lxc_log_define(lsm, lxc);
 
 static struct lsm_drv *drv = NULL;
 
@@ -111,8 +112,7 @@ int lsm_process_label_fd_get(pid_t pid, bool on_exec)
 
 	labelfd = open(path, O_RDWR);
 	if (labelfd < 0) {
-		SYSERROR("%s - Unable to %s LSM label file descriptor",
-			 name, strerror(errno));
+		SYSERROR("Unable to %s LSM label file descriptor", name);
 		return -1;
 	}
 

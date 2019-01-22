@@ -21,9 +21,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <lxc/lxccontainer.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -161,8 +163,7 @@ struct lxc_terminal_state *lxc_terminal_signal_init(int srcfd, int dstfd)
 		lxc_list_add_tail(&lxc_ttys, &ts->node);
 		ret = sigaddset(&mask, SIGWINCH);
 		if (ret < 0)
-			NOTICE("%s - Failed to add SIGWINCH to signal set",
-			       strerror(errno));
+			SYSNOTICE("Failed to add SIGWINCH to signal set");
 	}
 
 	/* Exit the mainloop cleanly on SIGTERM. */
@@ -172,7 +173,7 @@ struct lxc_terminal_state *lxc_terminal_signal_init(int srcfd, int dstfd)
 		goto on_error;
 	}
 
-	ret = sigprocmask(SIG_BLOCK, &mask, &ts->oldmask);
+	ret = pthread_sigmask(SIG_BLOCK, &mask, &ts->oldmask);
 	if (ret < 0) {
 		WARN("Failed to block signals");
 		goto on_error;
@@ -181,7 +182,7 @@ struct lxc_terminal_state *lxc_terminal_signal_init(int srcfd, int dstfd)
 	ts->sigfd = signalfd(-1, &mask, SFD_CLOEXEC);
 	if (ts->sigfd < 0) {
 		WARN("Failed to create signal fd");
-		sigprocmask(SIG_SETMASK, &ts->oldmask, NULL);
+		(void)pthread_sigmask(SIG_SETMASK, &ts->oldmask, NULL);
 		goto on_error;
 	}
 
@@ -206,8 +207,8 @@ void lxc_terminal_signal_fini(struct lxc_terminal_state *ts)
 	if (ts->sigfd >= 0) {
 		close(ts->sigfd);
 
-		if (sigprocmask(SIG_SETMASK, &ts->oldmask, NULL) < 0)
-			WARN("%s - Failed to restore signal mask", strerror(errno));
+		if (pthread_sigmask(SIG_SETMASK, &ts->oldmask, NULL) < 0)
+			SYSWARN("Failed to restore signal mask");
 	}
 
 	if (isatty(ts->stdinfd))
@@ -409,9 +410,10 @@ int lxc_terminal_io_cb(int fd, uint32_t events, void *data,
 	if (w != r)
 		WARN("Short write on terminal r:%d != w:%d", r, w);
 
-	if (w_rbuf < 0)
-		TRACE("%s - Failed to write %d bytes to terminal ringbuffer",
-		      strerror(-w_rbuf), r);
+	if (w_rbuf < 0) {
+		errno = -w_rbuf;
+		SYSTRACE("Failed to write %d bytes to terminal ringbuffer", r);
+	}
 
 	if (w_log < 0)
 		TRACE("Failed to write %d bytes to terminal log", r);
@@ -508,7 +510,8 @@ int lxc_setup_tios(int fd, struct termios *oldtios)
 #ifdef IEXTEN
 	newtios.c_lflag &= ~IEXTEN;
 #endif
-	newtios.c_oflag &= ~OPOST;
+	newtios.c_oflag &= ~ONLCR;
+	newtios.c_oflag |= OPOST;
 	newtios.c_cc[VMIN] = 1;
 	newtios.c_cc[VTIME] = 0;
 
@@ -567,11 +570,30 @@ static int lxc_terminal_peer_proxy_alloc(struct lxc_terminal *terminal,
 	/* This is the proxy terminal that will be given to the client, and
 	 * that the real terminal master will send to / recv from.
 	 */
-	ret = openpty(&terminal->proxy.master, &terminal->proxy.slave,
-		      terminal->proxy.name, NULL, NULL);
+	ret = openpty(&terminal->proxy.master, &terminal->proxy.slave, NULL,
+		      NULL, NULL);
 	if (ret < 0) {
 		SYSERROR("Failed to open proxy terminal");
 		return -1;
+	}
+
+	ret = ttyname_r(terminal->proxy.slave, terminal->proxy.name,
+			sizeof(terminal->proxy.name));
+	if (ret < 0) {
+		SYSERROR("Failed to retrieve name of proxy terminal slave");
+		goto on_error;
+	}
+
+	ret = fd_cloexec(terminal->proxy.master, true);
+	if (ret < 0) {
+		SYSERROR("Failed to set FD_CLOEXEC flag on proxy terminal master");
+		goto on_error;
+	}
+
+	ret = fd_cloexec(terminal->proxy.slave, true);
+	if (ret < 0) {
+		SYSERROR("Failed to set FD_CLOEXEC flag on proxy terminal slave");
+		goto on_error;
 	}
 
 	ret = lxc_setup_tios(terminal->proxy.slave, &oldtermio);
@@ -617,7 +639,7 @@ int lxc_terminal_allocate(struct lxc_conf *conf, int sockfd, int *ttyreq)
 	}
 
 	if (*ttyreq > 0) {
-		if (*ttyreq > ttys->nbtty)
+		if (*ttyreq > ttys->max)
 			goto out;
 
 		if (ttys->tty[*ttyreq - 1].busy)
@@ -629,12 +651,12 @@ int lxc_terminal_allocate(struct lxc_conf *conf, int sockfd, int *ttyreq)
 	}
 
 	/* Search for next available tty, fixup index tty1 => [0]. */
-	for (ttynum = 1; ttynum <= ttys->nbtty && ttys->tty[ttynum - 1].busy; ttynum++) {
+	for (ttynum = 1; ttynum <= ttys->max && ttys->tty[ttynum - 1].busy; ttynum++) {
 		;
 	}
 
 	/* We didn't find any available slot for tty. */
-	if (ttynum > ttys->nbtty)
+	if (ttynum > ttys->max)
 		goto out;
 
 	*ttyreq = ttynum;
@@ -653,7 +675,7 @@ void lxc_terminal_free(struct lxc_conf *conf, int fd)
 	struct lxc_tty_info *ttys = &conf->ttys;
 	struct lxc_terminal *terminal = &conf->console;
 
-	for (i = 0; i < ttys->nbtty; i++)
+	for (i = 0; i < ttys->max; i++)
 		if (ttys->tty[i].busy == fd)
 			ttys->tty[i].busy = 0;
 
@@ -667,35 +689,23 @@ void lxc_terminal_free(struct lxc_conf *conf, int fd)
 static int lxc_terminal_peer_default(struct lxc_terminal *terminal)
 {
 	struct lxc_terminal_state *ts;
-	const char *path = terminal->path;
-	int fd;
+	const char *path;
 	int ret = 0;
 
-	if (!path) {
-		ret = access("/dev/tty", F_OK);
-		if (ret == 0) {
-			/* If no terminal was given, try current controlling
-			 * terminal, there won't be one if we were started as a
-			 * daemon (-d).
-			 */
-			fd = open("/dev/tty", O_RDWR);
-			if (fd >= 0) {
-				close(fd);
-				path = "/dev/tty";
-			}
-		}
-	}
-
-	if (!path) {
-		errno = ENOTTY;
-		DEBUG("The process does not have a controlling terminal");
-		goto on_succes;
-	}
+	if (terminal->path)
+		path = terminal->path;
+	else
+		path = "/dev/tty";
 
 	terminal->peer = lxc_unpriv(open(path, O_RDWR | O_CLOEXEC));
 	if (terminal->peer < 0) {
-		ERROR("%s - Failed to open proxy terminal \"%s\"",
-		      strerror(errno), path);
+		if (!terminal->path) {
+			errno = ENODEV;
+			SYSDEBUG("The process does not have a controlling terminal");
+			goto on_succes;
+		}
+
+		SYSERROR("Failed to open proxy terminal \"%s\"", path);
 		return -ENOTTY;
 	}
 	DEBUG("Using terminal \"%s\" as proxy", path);
@@ -779,7 +789,7 @@ void lxc_terminal_delete(struct lxc_terminal *terminal)
 	if (terminal->tios && terminal->peer >= 0) {
 		ret = tcsetattr(terminal->peer, TCSAFLUSH, terminal->tios);
 		if (ret < 0)
-			WARN("%s - Failed to set old terminal settings", strerror(errno));
+			SYSWARN("Failed to set old terminal settings");
 	}
 	free(terminal->tios);
 	terminal->tios = NULL;
@@ -871,19 +881,25 @@ int lxc_terminal_create(struct lxc_terminal *terminal)
 {
 	int ret;
 
-	ret = openpty(&terminal->master, &terminal->slave, terminal->name, NULL, NULL);
+	ret = openpty(&terminal->master, &terminal->slave, NULL, NULL, NULL);
 	if (ret < 0) {
 		SYSERROR("Failed to open terminal");
 		return -1;
 	}
 
-	ret = fcntl(terminal->master, F_SETFD, FD_CLOEXEC);
+	ret = ttyname_r(terminal->slave, terminal->name, sizeof(terminal->name));
+	if (ret < 0) {
+		SYSERROR("Failed to retrieve name of terminal slave");
+		goto err;
+	}
+
+	ret = fd_cloexec(terminal->master, true);
 	if (ret < 0) {
 		SYSERROR("Failed to set FD_CLOEXEC flag on terminal master");
 		goto err;
 	}
 
-	ret = fcntl(terminal->slave, F_SETFD, FD_CLOEXEC);
+	ret = fd_cloexec(terminal->slave, true);
 	if (ret < 0) {
 		SYSERROR("Failed to set FD_CLOEXEC flag on terminal slave");
 		goto err;
@@ -1114,8 +1130,7 @@ restore_tios:
 	if (istty) {
 		istty = tcsetattr(stdinfd, TCSAFLUSH, &oldtios);
 		if (istty < 0)
-			WARN("%s - Failed to restore terminal properties",
-			     strerror(errno));
+			SYSWARN("Failed to restore terminal properties");
 	}
 
 close_mainloop:

@@ -33,23 +33,27 @@
 #include <lxc/lxccontainer.h>
 
 #include "arguments.h"
-#include "tool_utils.h"
+#include "log.h"
 
-static int my_checker(const struct lxc_arguments* args)
+lxc_log_define(lxc_wait, lxc);
+
+static int my_checker(const struct lxc_arguments *args)
 {
 	if (!args->states) {
-		lxc_error(args, "missing state option to wait for.");
+		ERROR("Missing state option to wait for");
 		return -1;
 	}
+
 	return 0;
 }
 
-static int my_parser(struct lxc_arguments* args, int c, char* arg)
+static int my_parser(struct lxc_arguments *args, int c, char *arg)
 {
 	switch (c) {
 	case 's': args->states = optarg; break;
 	case 't': args->timeout = atol(optarg); break;
 	}
+
 	return 0;
 }
 
@@ -87,39 +91,41 @@ int main(int argc, char *argv[])
 	if (lxc_arguments_parse(&my_args, argc, argv))
 		exit(EXIT_FAILURE);
 
-	if (!my_args.log_file)
-		my_args.log_file = "none";
+	/* Only create log if explicitly instructed */
+	if (my_args.log_file || my_args.log_priority) {
+		log.name = my_args.name;
+		log.file = my_args.log_file;
+		log.level = my_args.log_priority;
+		log.prefix = my_args.progname;
+		log.quiet = my_args.quiet;
+		log.lxcpath = my_args.lxcpath[0];
 
-	log.name = my_args.name;
-	log.file = my_args.log_file;
-	log.level = my_args.log_priority;
-	log.prefix = my_args.progname;
-	log.quiet = my_args.quiet;
-	log.lxcpath = my_args.lxcpath[0];
-
-	if (lxc_log_init(&log))
-		exit(EXIT_FAILURE);
+		if (lxc_log_init(&log))
+			exit(EXIT_FAILURE);
+	}
 
 	c = lxc_container_new(my_args.name, my_args.lxcpath[0]);
 	if (!c)
 		exit(EXIT_FAILURE);
 
 	if (!c->may_control(c)) {
-		fprintf(stderr, "Insufficent privileges to control %s\n", c->name);
+		ERROR("Insufficent privileges to control %s", c->name);
 		lxc_container_put(c);
 		exit(EXIT_FAILURE);
 	}
 
 	if (my_args.rcfile) {
 		c->clear_config(c);
+
 		if (!c->load_config(c, my_args.rcfile)) {
-			fprintf(stderr, "Failed to load rcfile\n");
+			ERROR("Failed to load rcfile");
 			lxc_container_put(c);
 			exit(EXIT_FAILURE);
 		}
+
 		c->configfile = strdup(my_args.rcfile);
 		if (!c->configfile) {
-			fprintf(stderr, "Out of memory setting new config filename\n");
+			ERROR("Out of memory setting new config filename");
 			lxc_container_put(c);
 			exit(EXIT_FAILURE);
 		}
@@ -129,5 +135,6 @@ int main(int argc, char *argv[])
 		lxc_container_put(c);
 		exit(EXIT_FAILURE);
 	}
+
 	exit(EXIT_SUCCESS);
 }
